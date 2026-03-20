@@ -67,9 +67,16 @@ class ModuleRegistry:
         """
         self._modules = self._load_modules()
         for module in self._modules:
-            await module.startup()
-            module.register_tools(mcp)
-            logger.info("module_started", module=module.name)
+            try:
+                await module.startup()
+                module.register_tools(mcp)
+                logger.info("module_started", module=module.name)
+            except Exception as e:
+                logger.warning(
+                    "module_startup_failed",
+                    module=module.name,
+                    error=str(e),
+                )
 
     async def shutdown(self) -> None:
         """Останавливает все модули в обратном порядке."""
