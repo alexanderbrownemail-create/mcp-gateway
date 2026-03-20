@@ -69,36 +69,39 @@ systemctl --user restart mcp-gateway
 
 ---
 
-## Архитектура
+## Концепция: универсальный инструментальный слой
+
+MCP-Gateway решает проблему **разрыва скоупов** между двумя агентами.
+
+**Claude Code harness** (subprocess, `claude --print`) — есть: Read/Write/Edit/Bash/Glob/Grep/WebFetch/WebSearch/Agent. Нет: бота, браузера, sessions_spawn, семантической памяти. TodoWrite сломан в `--print` режиме.
+
+**OpenClaw mini-bot** (native session) — есть: message/browser/sessions_spawn/memory_search. Нет: файловых операций в скоупе Claude Code, единого task-менеджера.
 
 ```
-Claude Code harness
-  ~/.claude.json: "gateway" → http://127.0.0.1:8200/mcp
-        │
-        ▼
-  MCP-Gateway (FastMCP, порт 8200)
-  ┌──────────────────────────────────┐
-  │         Module Registry          │
-  │  (конфиг: config.yml / env vars) │
-  └──┬──────────────┬────────────────┘
-     │              │
-     ▼              ▼
-telegram_user   telegram_bot      openclaw (будущее)
-(Pyrogram)      (Bot API)
-tg_*            bot_*
-     │              │
-     ▼              ▼
-Telegram        Telegram
-User API        Bot API
+Claude Code harness              MCP-Gateway :8200              OpenClaw mini-bot
+        │                                                               │
+        ├──► bot_*       ──────────────────────────────────────────────►│ (нет нативно)
+        ├──► browser_*   ──────────────────────────────────────────────►│ (shared CDP)
+        ├──► session_*   ──────────────────────────────────────────────►│
+        ├──► memory_*    ──────────────────────────────────────────────►│
+        ├──► task_*      ──────────────────────────────────────────────►│
+        │◄── tg_*        ◄──────────────────────────────────────────────┤
+        │◄── core_*      ◄── (файловые ops, bash, web) ─────────────────┤ (нет в MCP scope)
 ```
 
-### Модули
+## Модули
 
-| Модуль | Префикс инструментов | Транспорт | Назначение |
-|--------|----------------------|-----------|------------|
-| `telegram_user` | `tg_*` | Pyrogram → MTProto | Чтение/мониторинг личного аккаунта |
-| `telegram_bot` | `bot_*` | httpx → Bot API | Отправка сообщений с кнопками, файлов |
-| `openclaw` | `oc_*` | — | Будущее: нативные инструменты OpenClaw |
+| Модуль | Инструментов | Приоритет | Назначение |
+|--------|-------------|-----------|-----------|
+| `telegram_user` | 52 `tg_*` | 1 критичный | Чтение/мониторинг личного аккаунта (Pyrogram) |
+| `telegram_bot` | 13 `bot_*` | 1 критичный | Отправка от бота: текст+кнопки, файлы, голос |
+| `core` | 13 `core_*` | 1 критичный | Claude Code tools для mini-bot: bash/read/write/edit/glob/grep/web |
+| `browser` | 8 `browser_*` | 2 важный | Playwright CDP :18800: navigate/snapshot/click/type/screenshot |
+| `sessions` | 5 `session_*` | 2 важный | Spawn под-агентов через claude-code-proxy :3458 |
+| `memory` | 3 `memory_*` | 2 важный | Семантический поиск по ~/.openclaw/workspace/memory/ |
+| `tasks` | 4 `task_*` | 3 расширение | Замена сломанных TodoWrite/TodoRead |
+| `cron` | 4 `cron_*` | 3 расширение | OpenClaw Gateway cron jobs |
+| `media` | 3 `media_*` | 3 расширение | Анализ изображений/PDF, генерация |
 
 **Важно:** `tg_*` (user account) **не используются для отправки сообщений агентом** —
 это запрещено правилами. Отправка идёт только через `bot_*`.
@@ -112,29 +115,23 @@ mcp-gateway/
 ├── CLAUDE.md
 ├── README.md
 ├── pyproject.toml
-├── config.yml                  ← включить/отключить модули
+├── config.yml                      ← включить/отключить модули
 ├── src/
 │   └── mcp_gateway/
-│       ├── __init__.py
-│       ├── __main__.py
-│       ├── app.py              ← FastMCP + загрузка модулей
-│       ├── config.py           ← Settings (pydantic-settings)
-│       ├── registry.py         ← Module Registry
+│       ├── app.py                  ← FastMCP + загрузка модулей
+│       ├── config.py               ← GatewaySettings (pydantic-settings)
+│       ├── registry.py             ← ModuleRegistry
 │       └── modules/
-│           ├── base.py         ← BaseModule (интерфейс)
-│           ├── telegram_user/  ← перенесён из telegram-account-manager
-│           │   ├── __init__.py
-│           │   ├── client.py
-│           │   ├── config.py
-│           │   ├── services/
-│           │   └── tools.py
-│           ├── telegram_bot/
-│           │   ├── __init__.py
-│           │   ├── client.py   ← httpx Bot API client
-│           │   ├── config.py
-│           │   └── tools.py
-│           └── openclaw/
-│               └── __init__.py
+│           ├── base.py             ← BaseModule (интерфейс)
+│           ├── telegram_user/      ← перенос из telegram-account-manager (52 tg_*)
+│           ├── telegram_bot/       ← Bot API — частично готов: module.py (13 bot_*)
+│           ├── core/               ← Claude Code tools для mini-bot (13 core_*)
+│           ├── browser/            ← Playwright CDP :18800 (8 browser_*)
+│           ├── sessions/           ← spawn под-агентов (5 session_*)
+│           ├── memory/             ← семантический поиск памяти (3 memory_*)
+│           ├── tasks/              ← замена TodoWrite/TodoRead (4 task_*)
+│           ├── cron/               ← OpenClaw cron jobs (4 cron_*)
+│           └── media/              ← image/pdf анализ (3 media_*)
 └── tests/
     ├── unit/
     └── integration/
