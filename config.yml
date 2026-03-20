@@ -1,0 +1,18 @@
+# MCP-Gateway module configuration
+# Each module can be enabled/disabled independently.
+# Override via env vars: GATEWAY_MODULE_TELEGRAM_USER=true/false
+
+modules:
+  telegram_user:
+    enabled: true
+    # Pyrogram MTProto — read-only monitoring of user account
+    # Requires: TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_PHONE
+
+  telegram_bot:
+    enabled: true
+    # Telegram Bot API — send messages with buttons, files
+    # Requires: TELEGRAM_BOT_TOKEN
+
+  openclaw:
+    enabled: false
+    # Future: native OpenClaw tool wrappers
