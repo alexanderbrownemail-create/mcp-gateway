@@ -1,84 +1,95 @@
-"""TelegramBotModule — Telegram Bot API integration."""
-
+"""Модуль telegram_bot — отправка сообщений через Telegram Bot API."""
 from __future__ import annotations
 
-import logging
+import structlog
 
-import httpx
 from mcp.server.fastmcp import FastMCP
-from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from mcp_gateway.modules.base import BaseModule
+from mcp_gateway.modules.telegram_bot.client import BotApiError, BotClient, BotSettings
+from mcp_gateway.modules.telegram_bot.models import (
+    AnswerCallbackRequest,
+    DeleteMessageRequest,
+    EditMessageRequest,
+    ForwardMessageRequest,
+    InlineButton,
+    ParseMode,
+    PinMessageRequest,
+    SendMediaRequest,
+    SendMessageRequest,
+    SendTypingRequest,
+    SendVoiceRequest,
+)
 
-logger = logging.getLogger(__name__)
-
-
-class BotSettings(BaseSettings):
-    model_config = SettingsConfigDict(
-        env_file="~/.env",
-        env_file_encoding="utf-8",
-        extra="ignore",
-    )
-
-    telegram_bot_token: str = Field(..., description="Telegram Bot API token")
+logger = structlog.get_logger(__name__)
 
 
 class TelegramBotModule(BaseModule):
+    """Модуль Telegram Bot API.
+
+    Предоставляет инструменты для отправки сообщений, файлов, голосовых сообщений
+    и управления inline-клавиатурой от имени Telegram-бота.
+
+    Attributes:
+        name: Уникальное имя модуля.
+        _client: HTTP-клиент Bot API.
+    """
+
     name = "telegram_bot"
 
     def __init__(self) -> None:
-        self._settings = BotSettings()
-        self._client: httpx.AsyncClient | None = None
-
-    @property
-    def _base_url(self) -> str:
-        return f"https://api.telegram.org/bot{self._settings.telegram_bot_token}"
-
-    async def _call(self, method: str, **params: object) -> dict:
-        assert self._client is not None
-        resp = await self._client.post(f"{self._base_url}/{method}", json=params)
-        resp.raise_for_status()
-        return resp.json()
+        settings = BotSettings()
+        self._client = BotClient(settings.telegram_bot_token)
 
     async def startup(self) -> None:
-        self._client = httpx.AsyncClient(timeout=30)
-        me = await self._call("getMe")
-        logger.info("telegram_bot: connected as @%s", me["result"]["username"])
+        """Инициализирует клиент и проверяет токен бота."""
+        await self._client.start()
 
     def register_tools(self, mcp: FastMCP) -> None:
+        """Регистрирует все bot_* инструменты.
+
+        Args:
+            mcp: Экземпляр FastMCP.
+        """
+        client = self._client
 
         @mcp.tool()
         async def bot_send_message(
             chat_id: int | str,
             text: str,
             parse_mode: str = "Markdown",
-            buttons: list[list[dict]] | None = None,
+            buttons: list[list[dict[str, str]]] | None = None,
             reply_to_message_id: int | None = None,
-        ) -> dict:  # type: ignore[type-arg]
-            """Send a text message via Telegram bot.
+        ) -> dict[str, object]:
+            """Отправить текстовое сообщение через бота с опциональной inline-клавиатурой.
 
             Args:
-                chat_id: Target chat ID (int) or username (str, e.g. 'username').
-                text: Message text content.
-                parse_mode: Formatting: 'Markdown', 'HTML', or 'disabled'.
-                buttons: Inline keyboard rows. Each row is a list of button dicts:
-                         [{"text": "Label", "callback_data": "value"}].
-                         Example: [[{"text": "Yes", "callback_data": "yes"},
-                                    {"text": "No", "callback_data": "no"}]]
-                reply_to_message_id: Optional message ID to reply to.
+                chat_id: ID чата (int) или @username (str).
+                text: Текст сообщения (до 4096 символов).
+                parse_mode: Форматирование: Markdown, HTML или disabled.
+                buttons: Строки клавиатуры. Каждая строка — список кнопок:
+                         [{"text": "Да", "callback_data": "yes"}, ...].
+                         Кнопка может иметь callback_data ИЛИ url.
+                reply_to_message_id: ID сообщения для ответа (опционально).
             """
-            params: dict = {
-                "chat_id": chat_id,
-                "text": text,
-                "parse_mode": parse_mode if parse_mode != "disabled" else None,
-            }
+            parsed_buttons: list[list[InlineButton]] | None = None
             if buttons:
-                params["reply_markup"] = {"inline_keyboard": buttons}
-            if reply_to_message_id:
-                params["reply_to_message_id"] = reply_to_message_id
-            params = {k: v for k, v in params.items() if v is not None}
-            return await self._call("sendMessage", **params)
+                parsed_buttons = [
+                    [InlineButton.model_validate(btn) for btn in row]
+                    for row in buttons
+                ]
+            req = SendMessageRequest(
+                chat_id=chat_id,
+                text=text,
+                parse_mode=ParseMode(parse_mode),
+                buttons=parsed_buttons,
+                reply_to_message_id=reply_to_message_id,
+            )
+            try:
+                result = await client.send_message(req)
+                return result.model_dump()
+            except BotApiError as e:
+                return {"ok": False, "error_code": e.error_code, "description": e.description}
 
         @mcp.tool()
         async def bot_send_document(
@@ -86,29 +97,26 @@ class TelegramBotModule(BaseModule):
             file_path: str,
             caption: str | None = None,
             parse_mode: str = "Markdown",
-        ) -> dict:  # type: ignore[type-arg]
-            """Send a file (document) via Telegram bot.
+        ) -> dict[str, object]:
+            """Отправить файл-документ через бота.
 
             Args:
-                chat_id: Target chat ID (int) or username (str).
-                file_path: Absolute path to the file on the server.
-                caption: Optional caption text.
-                parse_mode: Caption formatting: 'Markdown', 'HTML', or 'disabled'.
+                chat_id: ID чата (int) или @username (str).
+                file_path: Абсолютный путь к файлу на сервере.
+                caption: Подпись к файлу (до 1024 символов, опционально).
+                parse_mode: Форматирование подписи: Markdown, HTML или disabled.
             """
-            assert self._client is not None
-            with open(file_path, "rb") as f:
-                data: dict = {"chat_id": str(chat_id)}
-                if caption:
-                    data["caption"] = caption
-                    if parse_mode != "disabled":
-                        data["parse_mode"] = parse_mode
-                resp = await self._client.post(
-                    f"{self._base_url}/sendDocument",
-                    data=data,
-                    files={"document": f},
-                )
-            resp.raise_for_status()
-            return resp.json()
+            req = SendMediaRequest(
+                chat_id=chat_id,
+                file_path=file_path,
+                caption=caption,
+                parse_mode=ParseMode(parse_mode),
+            )
+            try:
+                result = await client.send_document(req)
+                return result.model_dump()
+            except BotApiError as e:
+                return {"ok": False, "error_code": e.error_code, "description": e.description}
 
         @mcp.tool()
         async def bot_send_photo(
@@ -116,49 +124,119 @@ class TelegramBotModule(BaseModule):
             file_path: str,
             caption: str | None = None,
             parse_mode: str = "Markdown",
-        ) -> dict:  # type: ignore[type-arg]
-            """Send a photo via Telegram bot.
+        ) -> dict[str, object]:
+            """Отправить фотографию через бота.
 
             Args:
-                chat_id: Target chat ID (int) or username (str).
-                file_path: Absolute path to the image file on the server.
-                caption: Optional caption text.
-                parse_mode: Caption formatting: 'Markdown', 'HTML', or 'disabled'.
+                chat_id: ID чата (int) или @username (str).
+                file_path: Абсолютный путь к изображению на сервере.
+                caption: Подпись (до 1024 символов, опционально).
+                parse_mode: Форматирование подписи: Markdown, HTML или disabled.
             """
-            assert self._client is not None
-            with open(file_path, "rb") as f:
-                data: dict = {"chat_id": str(chat_id)}
-                if caption:
-                    data["caption"] = caption
-                    if parse_mode != "disabled":
-                        data["parse_mode"] = parse_mode
-                resp = await self._client.post(
-                    f"{self._base_url}/sendPhoto",
-                    data=data,
-                    files={"photo": f},
-                )
-            resp.raise_for_status()
-            return resp.json()
+            req = SendMediaRequest(
+                chat_id=chat_id,
+                file_path=file_path,
+                caption=caption,
+                parse_mode=ParseMode(parse_mode),
+            )
+            try:
+                result = await client.send_photo(req)
+                return result.model_dump()
+            except BotApiError as e:
+                return {"ok": False, "error_code": e.error_code, "description": e.description}
 
         @mcp.tool()
-        async def bot_answer_callback(
-            callback_query_id: str,
-            text: str | None = None,
-            show_alert: bool = False,
-        ) -> dict:  # type: ignore[type-arg]
-            """Answer an inline keyboard button press.
+        async def bot_send_video(
+            chat_id: int | str,
+            file_path: str,
+            caption: str | None = None,
+            parse_mode: str = "Markdown",
+        ) -> dict[str, object]:
+            """Отправить видео через бота.
 
             Args:
-                callback_query_id: ID from the incoming callback_query.
-                text: Optional notification text shown to the user.
-                show_alert: If True, show as alert popup instead of toast.
+                chat_id: ID чата (int) или @username (str).
+                file_path: Абсолютный путь к видеофайлу на сервере.
+                caption: Подпись (до 1024 символов, опционально).
+                parse_mode: Форматирование подписи: Markdown, HTML или disabled.
             """
-            return await self._call(
-                "answerCallbackQuery",
-                callback_query_id=callback_query_id,
-                text=text,
-                show_alert=show_alert,
+            req = SendMediaRequest(
+                chat_id=chat_id,
+                file_path=file_path,
+                caption=caption,
+                parse_mode=ParseMode(parse_mode),
             )
+            try:
+                result = await client.send_video(req)
+                return result.model_dump()
+            except BotApiError as e:
+                return {"ok": False, "error_code": e.error_code, "description": e.description}
+
+        @mcp.tool()
+        async def bot_send_voice(
+            chat_id: int | str,
+            text: str,
+            voice: str = "ru-RU-SvetlanaNeural",
+        ) -> dict[str, object]:
+            """Синтезировать речь и отправить голосовым сообщением через бота.
+
+            Использует edge-tts, формат ogg-24khz-16bit-mono-opus (Telegram принимает как voice).
+
+            Args:
+                chat_id: ID чата (int) или @username (str).
+                text: Текст для синтеза (до 4096 символов).
+                voice: Голос edge-tts. Примеры:
+                       ru-RU-SvetlanaNeural, ru-RU-DmitryNeural,
+                       en-US-AriaNeural, en-US-GuyNeural.
+            """
+            req = SendVoiceRequest(chat_id=chat_id, text=text, voice=voice)
+            try:
+                result = await client.send_voice(req)
+                return result.model_dump()
+            except BotApiError as e:
+                return {"ok": False, "error_code": e.error_code, "description": e.description}
+
+        @mcp.tool()
+        async def bot_send_sticker(
+            chat_id: int | str,
+            sticker_file_id: str,
+        ) -> dict[str, object]:
+            """Отправить стикер через бота.
+
+            Args:
+                chat_id: ID чата (int) или @username (str).
+                sticker_file_id: Telegram file_id стикера
+                                 (можно получить из входящего сообщения).
+            """
+            try:
+                result = await client.send_sticker(chat_id, sticker_file_id)
+                return result.model_dump()
+            except BotApiError as e:
+                return {"ok": False, "error_code": e.error_code, "description": e.description}
+
+        @mcp.tool()
+        async def bot_forward_message(
+            from_chat_id: int | str,
+            message_id: int,
+            to_chat_id: int | str,
+        ) -> dict[str, object]:
+            """Переслать сообщение через бота.
+
+            Args:
+                from_chat_id: ID исходного чата.
+                message_id: ID пересылаемого сообщения.
+                to_chat_id: ID целевого чата.
+            """
+            req = ForwardMessageRequest(
+                from_chat_id=from_chat_id,
+                message_id=message_id,
+                to_chat_id=to_chat_id,
+            )
+            try:
+                result = await client.forward_message(req)
+                return result.model_dump()
+            except BotApiError as e:
+                return {"ok": False, "error_code": e.error_code, "description": e.description}
 
         @mcp.tool()
         async def bot_edit_message(
@@ -166,28 +244,170 @@ class TelegramBotModule(BaseModule):
             message_id: int,
             text: str,
             parse_mode: str = "Markdown",
-            buttons: list[list[dict]] | None = None,
-        ) -> dict:  # type: ignore[type-arg]
-            """Edit a previously sent bot message.
+            buttons: list[list[dict[str, str]]] | None = None,
+        ) -> dict[str, object]:
+            """Редактировать ранее отправленное сообщение бота.
 
             Args:
-                chat_id: Chat ID (int) or username (str).
-                message_id: ID of the message to edit.
-                text: New message text.
-                parse_mode: Formatting: 'Markdown', 'HTML', or 'disabled'.
-                buttons: New inline keyboard (replaces old one). Pass [] to remove.
+                chat_id: ID чата (int) или @username (str).
+                message_id: ID редактируемого сообщения.
+                text: Новый текст.
+                parse_mode: Форматирование: Markdown, HTML или disabled.
+                buttons: Новая клавиатура (None — не менять, [] — убрать).
             """
-            params: dict = {
-                "chat_id": chat_id,
-                "message_id": message_id,
-                "text": text,
-                "parse_mode": parse_mode if parse_mode != "disabled" else None,
-            }
+            parsed_buttons: list[list[InlineButton]] | None = None
             if buttons is not None:
-                params["reply_markup"] = {"inline_keyboard": buttons}
-            params = {k: v for k, v in params.items() if v is not None}
-            return await self._call("editMessageText", **params)
+                parsed_buttons = [
+                    [InlineButton.model_validate(btn) for btn in row]
+                    for row in buttons
+                ]
+            req = EditMessageRequest(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=text,
+                parse_mode=ParseMode(parse_mode),
+                buttons=parsed_buttons,
+            )
+            try:
+                result = await client.edit_message(req)
+                return result.model_dump()
+            except BotApiError as e:
+                return {"ok": False, "error_code": e.error_code, "description": e.description}
+
+        @mcp.tool()
+        async def bot_delete_message(
+            chat_id: int | str,
+            message_id: int,
+        ) -> dict[str, object]:
+            """Удалить сообщение бота.
+
+            Args:
+                chat_id: ID чата (int) или @username (str).
+                message_id: ID удаляемого сообщения.
+            """
+            req = DeleteMessageRequest(chat_id=chat_id, message_id=message_id)
+            try:
+                result = await client.delete_message(req)
+                return result.model_dump()
+            except BotApiError as e:
+                return {"ok": False, "error_code": e.error_code, "description": e.description}
+
+        @mcp.tool()
+        async def bot_pin_message(
+            chat_id: int | str,
+            message_id: int,
+            disable_notification: bool = True,
+        ) -> dict[str, object]:
+            """Закрепить сообщение в чате.
+
+            Args:
+                chat_id: ID чата (int) или @username (str).
+                message_id: ID закрепляемого сообщения.
+                disable_notification: Закрепить без уведомления (по умолчанию True).
+            """
+            req = PinMessageRequest(
+                chat_id=chat_id,
+                message_id=message_id,
+                disable_notification=disable_notification,
+            )
+            try:
+                result = await client.pin_message(req)
+                return result.model_dump()
+            except BotApiError as e:
+                return {"ok": False, "error_code": e.error_code, "description": e.description}
+
+        @mcp.tool()
+        async def bot_unpin_message(
+            chat_id: int | str,
+            message_id: int,
+        ) -> dict[str, object]:
+            """Открепить сообщение в чате.
+
+            Args:
+                chat_id: ID чата (int) или @username (str).
+                message_id: ID открепляемого сообщения.
+            """
+            try:
+                result = await client.unpin_message(chat_id, message_id)
+                return result.model_dump()
+            except BotApiError as e:
+                return {"ok": False, "error_code": e.error_code, "description": e.description}
+
+        @mcp.tool()
+        async def bot_answer_callback(
+            callback_query_id: str,
+            text: str | None = None,
+            show_alert: bool = False,
+        ) -> dict[str, object]:
+            """Ответить на нажатие inline-кнопки.
+
+            Обязательно вызвать в течение 10 секунд после нажатия,
+            иначе Telegram покажет ошибку пользователю.
+
+            Args:
+                callback_query_id: ID из поля callback_query.id входящего update.
+                text: Текст уведомления (до 200 символов, опционально).
+                show_alert: Показать как alert-попап вместо быстрого тоста.
+            """
+            req = AnswerCallbackRequest(
+                callback_query_id=callback_query_id,
+                text=text,
+                show_alert=show_alert,
+            )
+            try:
+                result = await client.answer_callback(req)
+                return result.model_dump()
+            except BotApiError as e:
+                return {"ok": False, "error_code": e.error_code, "description": e.description}
+
+        @mcp.tool()
+        async def bot_set_typing(
+            chat_id: int | str,
+            action: str = "typing",
+        ) -> dict[str, object]:
+            """Отправить индикатор действия боту (печатает, загружает файл и т.д.).
+
+            Args:
+                chat_id: ID чата (int) или @username (str).
+                action: Тип действия:
+                        typing — печатает,
+                        upload_document — загружает файл,
+                        upload_photo — загружает фото,
+                        upload_video — загружает видео,
+                        record_voice — записывает голосовое,
+                        playing — играет.
+            """
+            req = SendTypingRequest(chat_id=chat_id, action=action)
+            try:
+                result = await client.set_typing(req)
+                return result.model_dump()
+            except BotApiError as e:
+                return {"ok": False, "error_code": e.error_code, "description": e.description}
+
+        @mcp.tool()
+        async def bot_get_updates(
+            offset: int | None = None,
+            limit: int = 100,
+        ) -> dict[str, object]:
+            """Получить входящие обновления (нажатия кнопок, сообщения боту).
+
+            Polling-метод. Каждый вызов подтверждает все update с id < offset.
+            Для получения следующей порции передай offset = last_update_id + 1.
+
+            Args:
+                offset: ID следующего ожидаемого update (предыдущие подтверждаются).
+                limit: Максимум обновлений в ответе (1-100, по умолчанию 100).
+
+            Returns:
+                Словарь {"ok": true, "updates": [...], "count": int}.
+                Каждый update может содержать поля: message, callback_query и др.
+            """
+            try:
+                updates = await client.get_updates(offset=offset, limit=limit)
+                return {"ok": True, "updates": updates, "count": len(updates)}
+            except BotApiError as e:
+                return {"ok": False, "error_code": e.error_code, "description": e.description}
 
     async def shutdown(self) -> None:
-        if self._client:
-            await self._client.aclose()
+        """Закрывает HTTP-соединение с Bot API."""
+        await self._client.stop()
