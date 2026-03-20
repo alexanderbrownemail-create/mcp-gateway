@@ -35,9 +35,10 @@ def _patch_call_tool(mcp: Any) -> None:
             elapsed = time.monotonic() - t0
             result_repr = _truncate(result, _MAX_RESULT_LEN)
             try:
-                content = result.content if hasattr(result, "content") else result
-                if content and hasattr(content[0], "text"):
-                    result_repr = _truncate(content[0].text, _MAX_RESULT_LEN)
+                # result is a tuple (list[Content], raw_dict) from ToolManager
+                content_list = result[0] if isinstance(result, tuple) else result
+                if content_list and hasattr(content_list[0], "text"):
+                    result_repr = _truncate(content_list[0].text, _MAX_RESULT_LEN)
             except Exception:
                 pass
             logger.info(
