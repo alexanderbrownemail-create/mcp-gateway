@@ -1,3 +1,5 @@
-"""Telegram User module — read-only access via Pyrogram MTProto."""
+"""Telegram User module — read/monitor Telegram via MTProto (Pyrogram)."""
 
-# TelegramUserModule will be implemented when migrating from telegram-account-manager
+from mcp_gateway.modules.telegram_user.module import TelegramUserModule
+
+__all__ = ["TelegramUserModule"]
