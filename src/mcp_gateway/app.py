@@ -31,18 +31,4 @@ def create_app(settings: GatewaySettings | None = None) -> tuple[FastMCP, Module
 
     registry = ModuleRegistry(settings)
 
-    @mcp.on_event("startup")
-    async def on_startup() -> None:
-        await registry.startup(mcp)
-        logger.info(
-            "gateway_ready",
-            host=settings.gateway_host,
-            port=settings.gateway_port,
-        )
-
-    @mcp.on_event("shutdown")
-    async def on_shutdown() -> None:
-        await registry.shutdown()
-        logger.info("gateway_stopped")
-
     return mcp, registry
