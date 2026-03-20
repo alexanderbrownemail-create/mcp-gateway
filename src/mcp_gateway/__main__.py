@@ -23,8 +23,9 @@ def _truncate(value: Any, limit: int) -> str:
 
 
 def _patch_call_tool(mcp: Any) -> None:
-    """Wrap mcp.call_tool to log every tool invocation with args and result."""
-    original = mcp.call_tool
+    """Wrap _tool_manager.call_tool to log every tool invocation with args and result."""
+    tm = mcp._tool_manager
+    original = tm.call_tool
 
     async def _logged_call_tool(name: str, arguments: dict[str, Any] | None = None, **kwargs: Any) -> Any:  # noqa: ANN401
         args_repr = _truncate(arguments or {}, _MAX_ARG_LEN)
@@ -32,7 +33,6 @@ def _patch_call_tool(mcp: Any) -> None:
         try:
             result = await original(name, arguments, **kwargs)
             elapsed = time.monotonic() - t0
-            # Extract text from first content item if possible
             result_repr = _truncate(result, _MAX_RESULT_LEN)
             try:
                 content = result.content if hasattr(result, "content") else result
@@ -59,7 +59,7 @@ def _patch_call_tool(mcp: Any) -> None:
             )
             raise
 
-    mcp.call_tool = _logged_call_tool
+    tm.call_tool = _logged_call_tool
 
 
 async def _run() -> None:
