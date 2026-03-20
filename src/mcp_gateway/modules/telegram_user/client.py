@@ -32,6 +32,7 @@ class UserSettings(BaseSettings):
     telegram_api_id: int = Field(..., description="Telegram API ID")
     telegram_api_hash: str = Field(..., description="Telegram API Hash")
     telegram_phone: str = Field(..., description="Telegram phone number")
+    telegram_2fa_password: str | None = Field(None, description="Telegram 2FA password (cloud password)")
     tg_manager_session_dir: str = Field(
         "~/.telegram-sessions",
         description="Directory to store .session files",
@@ -68,13 +69,17 @@ class UserClient:
         session_dir.mkdir(parents=True, exist_ok=True)
         session_file = session_dir / "account"
 
-        self._app = Client(
-            name=str(session_file),
-            api_id=self._settings.telegram_api_id,
-            api_hash=self._settings.telegram_api_hash,
-            phone_number=self._settings.telegram_phone,
-            in_memory=False,
-        )
+        client_kwargs: dict[str, Any] = {
+            "name": str(session_file),
+            "api_id": self._settings.telegram_api_id,
+            "api_hash": self._settings.telegram_api_hash,
+            "phone_number": self._settings.telegram_phone,
+            "in_memory": False,
+        }
+        if self._settings.telegram_2fa_password:
+            client_kwargs["password"] = self._settings.telegram_2fa_password
+
+        self._app = Client(**client_kwargs)
         await self._app.start()
         me = await self._app.get_me()
         username = me.username or self._settings.telegram_phone
