@@ -42,8 +42,8 @@ class BrowserSettings(BaseSettings):
     )
 
     browser_cdp_url: str = Field(
-        "ws://127.0.0.1:18800",
-        description="Chrome DevTools Protocol WebSocket URL",
+        "http://127.0.0.1:18800",
+        description="Chrome DevTools Protocol HTTP endpoint (Playwright connect_over_cdp expects http://)",
     )
 
 
