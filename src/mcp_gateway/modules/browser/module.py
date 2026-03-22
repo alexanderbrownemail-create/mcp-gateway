@@ -52,13 +52,13 @@ class BrowserModule(BaseModule):
 
     Подключается к уже запущенному Chrome/Chromium через CDP.
     Предоставляет навигацию, клики, ввод текста, скриншоты, JS-исполнение.
+    Автоматически переподключается при разрыве соединения.
 
     Attributes:
         name: Уникальное имя модуля.
         _settings: Настройки модуля.
         _playwright: Playwright instance.
-        _browser: Playwright Browser объект.
-        _page: Активная страница.
+        _browser: Playwright Browser объект (None до первого подключения).
     """
 
     name = "browser"
@@ -69,13 +69,45 @@ class BrowserModule(BaseModule):
         self._browser: object | None = None
 
     async def startup(self) -> None:
-        """Подключается к Chrome через CDP."""
+        """Инициализирует Playwright и подключается к Chrome через CDP.
+
+        Если Chrome недоступен в момент старта — Playwright инициализируется,
+        но соединение откладывается до первого вызова инструмента.
+        """
         from playwright.async_api import async_playwright
 
         pw = await async_playwright().start()
         self._playwright = pw
-        self._browser = await pw.chromium.connect_over_cdp(self._settings.browser_cdp_url)
-        logger.info("browser_connected", cdp_url=self._settings.browser_cdp_url)
+        try:
+            self._browser = await pw.chromium.connect_over_cdp(self._settings.browser_cdp_url)
+            logger.info("browser_connected", cdp_url=self._settings.browser_cdp_url)
+        except Exception as exc:
+            # Chrome ещё не запущен — подключимся при первом вызове инструмента
+            logger.warning("browser_connect_deferred", error=str(exc))
+            self._browser = None
+
+    async def _ensure_connected(self) -> None:
+        """Переподключается к CDP, если соединение потеряно или не установлено.
+
+        Вызывается перед каждым обращением к браузеру. Если browser.contexts
+        пуст (Chrome перезапустился), закрывает устаревший объект и создаёт новый.
+        """
+        if self._browser is not None:
+            contexts = self._browser.contexts  # type: ignore[attr-defined]
+            if contexts:
+                return  # соединение живо
+            # Chrome перезапустился — contexts пусты, нужен reconnect
+            try:
+                await self._browser.close()  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            self._browser = None
+
+        assert self._playwright is not None, "Playwright не инициализирован"
+        self._browser = await self._playwright.chromium.connect_over_cdp(  # type: ignore[attr-defined]
+            self._settings.browser_cdp_url
+        )
+        logger.info("browser_reconnected", cdp_url=self._settings.browser_cdp_url)
 
     def _page(self) -> object:
         """Возвращает активную страницу (первый контекст, первая страница)."""
@@ -113,6 +145,7 @@ class BrowserModule(BaseModule):
             """
             req = NavigateRequest(url=url, wait_until=wait_until, timeout_ms=timeout_ms)
             try:
+                await self._ensure_connected()
                 page = self._page()
                 response = await page.goto(  # type: ignore[attr-defined]
                     req.url,
@@ -143,6 +176,7 @@ class BrowserModule(BaseModule):
                 Словарь {url, title, snapshot}.
             """
             try:
+                await self._ensure_connected()
                 page = self._page()
                 snapshot = await page.accessibility.snapshot()  # type: ignore[attr-defined]
                 result = SnapshotResult(
@@ -171,6 +205,7 @@ class BrowserModule(BaseModule):
             """
             req = ScreenshotRequest(path=path, full_page=full_page)
             try:
+                await self._ensure_connected()
                 page = self._page()
                 p = Path(req.path)
                 p.parent.mkdir(parents=True, exist_ok=True)
@@ -198,6 +233,7 @@ class BrowserModule(BaseModule):
             """
             req = ClickRequest(selector=selector, timeout_ms=timeout_ms)
             try:
+                await self._ensure_connected()
                 page = self._page()
                 await page.click(req.selector, timeout=req.timeout_ms)  # type: ignore[attr-defined]
                 result = ClickResult(ok=True, selector=req.selector)
@@ -225,6 +261,7 @@ class BrowserModule(BaseModule):
             """
             req = TypeRequest(selector=selector, text=text, clear_first=clear_first)
             try:
+                await self._ensure_connected()
                 page = self._page()
                 if req.clear_first:
                     await page.fill(req.selector, "")  # type: ignore[attr-defined]
@@ -250,6 +287,7 @@ class BrowserModule(BaseModule):
             """
             req = EvaluateRequest(expression=expression)
             try:
+                await self._ensure_connected()
                 page = self._page()
                 value = await page.evaluate(req.expression)  # type: ignore[attr-defined]
                 result = EvaluateResult(ok=True, result=json.dumps(value, ensure_ascii=False))
@@ -266,6 +304,7 @@ class BrowserModule(BaseModule):
                 Словарь {url, title}.
             """
             try:
+                await self._ensure_connected()
                 page = self._page()
                 result = UrlResult(
                     url=page.url,  # type: ignore[attr-defined]
@@ -284,6 +323,7 @@ class BrowserModule(BaseModule):
                 Словарь {ok}.
             """
             try:
+                await self._ensure_connected()
                 page = self._page()
                 await page.close()  # type: ignore[attr-defined]
                 logger.info("browser_close")
